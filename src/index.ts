@@ -42,6 +42,7 @@ import { startSchedulerLoop } from './task-scheduler.js';
 import { NewMessage, RegisteredGroup, Session } from './types.js';
 import { loadJson, saveJson } from './utils.js';
 import { logger } from './logger.js';
+import { handleXIntegrationIpc } from './plugins/x-integration/host.js';
 
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -645,7 +646,10 @@ async function processTaskIpc(
       break;
 
     default:
-      logger.warn({ type: data.type }, 'Unknown IPC task type');
+      const handled = await handleXIntegrationIpc(data, sourceGroup, isMain, DATA_DIR);
+      if (!handled) {
+        logger.warn({ type: data.type }, 'Unknown IPC task type');
+      }
   }
 }
 
