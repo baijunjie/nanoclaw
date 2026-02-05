@@ -4,7 +4,19 @@
  * Usage: echo '{"tweetUrl":"https://x.com/user/status/123","content":"Great post!"}' | npx tsx reply.ts
  */
 
-import { getBrowserContext, navigateToTweet, runScript, validateContent, config, ScriptResult } from '../lib/browser.js';
+import { getBrowserContext, navigateToTweet } from '../lib/browser.js';
+import { runScript, ScriptResult } from '../lib/script.js';
+import {
+  validateTweetUrl,
+  validateContent,
+  getFirstTweet,
+  clickTweetButton,
+  fillDialogAndSubmit,
+  truncateForDisplay
+} from '../lib/utils.js';
+import { config } from '../lib/config.js';
+
+const btn = config.selectors.buttons;
 
 interface ReplyInput {
   tweetUrl: string;
@@ -14,9 +26,8 @@ interface ReplyInput {
 async function replyToTweet(input: ReplyInput): Promise<ScriptResult> {
   const { tweetUrl, content } = input;
 
-  if (!tweetUrl) {
-    return { success: false, message: 'Please provide a tweet URL' };
-  }
+  const urlError = validateTweetUrl(tweetUrl);
+  if (urlError) return urlError;
 
   const validationError = validateContent(content, 'Reply');
   if (validationError) return validationError;
@@ -31,39 +42,24 @@ async function replyToTweet(input: ReplyInput): Promise<ScriptResult> {
     }
 
     // Click reply button
-    const tweet = page.locator('article[data-testid="tweet"]').first();
-    const replyButton = tweet.locator('[data-testid="reply"]');
-    await replyButton.waitFor({ timeout: config.timeouts.elementWait });
-    await replyButton.click();
-    await page.waitForTimeout(config.timeouts.afterClick * 1.5);
+    const tweet = getFirstTweet(page);
+    await clickTweetButton(tweet, btn.reply, page);
+    await page.waitForTimeout(config.timeouts.shortPause);
 
-    // Find dialog with aria-modal="true" to avoid matching other dialogs
-    const dialog = page.locator('[role="dialog"][aria-modal="true"]');
-    await dialog.waitFor({ timeout: config.timeouts.elementWait });
+    // Fill dialog and submit
+    const result = await fillDialogAndSubmit({
+      page,
+      content,
+      contentLabel: 'Reply'
+    });
 
-    // Fill reply content
-    const replyInput = dialog.locator('[data-testid="tweetTextarea_0"]');
-    await replyInput.waitFor({ timeout: config.timeouts.elementWait });
-    await replyInput.click();
-    await page.waitForTimeout(config.timeouts.afterClick / 2);
-    await replyInput.fill(content);
-    await page.waitForTimeout(config.timeouts.afterFill);
-
-    // Click submit button
-    const submitButton = dialog.locator('[data-testid="tweetButton"]');
-    await submitButton.waitFor({ timeout: config.timeouts.elementWait });
-
-    const isDisabled = await submitButton.getAttribute('aria-disabled');
-    if (isDisabled === 'true') {
-      return { success: false, message: 'Submit button disabled. Content may be empty or exceed character limit.' };
+    if (!result.success) {
+      return { success: false, message: result.error || 'Failed to submit reply' };
     }
-
-    await submitButton.click();
-    await page.waitForTimeout(config.timeouts.afterSubmit);
 
     return {
       success: true,
-      message: `Reply posted: ${content.slice(0, 50)}${content.length > 50 ? '...' : ''}`
+      message: `Reply posted: ${truncateForDisplay(content)}`
     };
 
   } finally {

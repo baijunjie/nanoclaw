@@ -1,6 +1,5 @@
 /**
- * X Integration - Shared utilities
- * Used by all X scripts
+ * X Integration - Browser context and navigation
  */
 
 import { chromium, BrowserContext, Page } from 'playwright';
@@ -8,88 +7,56 @@ import fs from 'fs';
 import path from 'path';
 import { config } from './config.js';
 
-export { config };
+// Track current context for cleanup on termination
+let currentContext: BrowserContext | null = null;
 
-export interface ScriptResult {
-  success: boolean;
-  message: string;
-  data?: unknown;
-}
-
-/**
- * Read input from stdin
- */
-export async function readInput<T>(): Promise<T> {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    process.stdin.setEncoding('utf8');
-    process.stdin.on('data', chunk => { data += chunk; });
-    process.stdin.on('end', () => {
-      try {
-        resolve(JSON.parse(data));
-      } catch (err) {
-        reject(new Error(`Invalid JSON input: ${err}`));
-      }
-    });
-    process.stdin.on('error', reject);
-  });
-}
+// Graceful shutdown on SIGTERM
+process.on('SIGTERM', async () => {
+  if (currentContext) {
+    await currentContext.close().catch(() => {});
+  }
+  process.exit(0);
+});
 
 /**
- * Write result to stdout
- */
-export function writeResult(result: ScriptResult): void {
-  console.log(JSON.stringify(result));
-}
-
-/**
- * Clean up browser lock files
+ * Clean up browser lock files to prevent "browser already running" errors
  */
 export function cleanupLockFiles(): void {
   for (const lockFile of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
     const lockPath = path.join(config.browserDataDir, lockFile);
     if (fs.existsSync(lockPath)) {
-      try { fs.unlinkSync(lockPath); } catch {}
+      try {
+        fs.unlinkSync(lockPath);
+      } catch {
+      }
     }
   }
 }
 
 /**
- * Validate tweet/reply content
- */
-export function validateContent(content: string | undefined, type = 'Tweet'): ScriptResult | null {
-  if (!content || content.length === 0) {
-    return { success: false, message: `${type} content cannot be empty` };
-  }
-  if (content.length > config.limits.tweetMaxLength) {
-    return { success: false, message: `${type} exceeds ${config.limits.tweetMaxLength} character limit (current: ${content.length})` };
-  }
-  return null; // Valid
-}
-
-/**
  * Get browser context with persistent profile
+ * @param skipAuthCheck - Skip auth file check (for setup script)
  */
-export async function getBrowserContext(): Promise<BrowserContext> {
-  if (!fs.existsSync(config.authPath)) {
+export async function getBrowserContext(skipAuthCheck = false): Promise<BrowserContext> {
+  if (!skipAuthCheck && !fs.existsSync(config.authPath)) {
     throw new Error('X authentication not configured. Run /x-integration to complete login.');
   }
 
   cleanupLockFiles();
 
-  const context = await chromium.launchPersistentContext(config.browserDataDir, {
+  currentContext = await chromium.launchPersistentContext(config.browserDataDir, {
     executablePath: config.chromePath,
     headless: false,
     viewport: config.viewport,
-    args: config.chromeArgs,
-    ignoreDefaultArgs: config.chromeIgnoreDefaultArgs,
+    args: config.chrome.args,
+    ignoreDefaultArgs: config.chrome.ignoreDefaultArgs,
   });
 
-  return context;
+  return currentContext;
 }
 
 /**
- * Extract tweet ID from URL or raw ID
+ * Extract tweet ID from URL or raw ID string
  */
 export function extractTweetId(input: string): string | null {
   const urlMatch = input.match(/(?:x\.com|twitter\.com)\/\w+\/status\/(\d+)/);
@@ -99,7 +66,7 @@ export function extractTweetId(input: string): string | null {
 }
 
 /**
- * Navigate to a tweet page
+ * Navigate to a tweet page and verify it exists
  */
 export async function navigateToTweet(
   context: BrowserContext,
@@ -115,9 +82,9 @@ export async function navigateToTweet(
 
   try {
     await page.goto(url, { timeout: config.timeouts.navigation, waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(config.timeouts.pageLoad);
+    await page.waitForTimeout(config.timeouts.loadWait);
 
-    const exists = await page.locator('article[data-testid="tweet"]').first().isVisible().catch(() => false);
+    const exists = await page.locator(config.selectors.tweet).first().isVisible().catch(() => false);
     if (!exists) {
       return { page, success: false, error: 'Tweet not found. It may have been deleted or the URL is invalid.' };
     }
@@ -125,24 +92,5 @@ export async function navigateToTweet(
     return { page, success: true };
   } catch (err) {
     return { page, success: false, error: `Navigation failed: ${err instanceof Error ? err.message : String(err)}` };
-  }
-}
-
-/**
- * Run script with error handling
- */
-export async function runScript<T>(
-  handler: (input: T) => Promise<ScriptResult>
-): Promise<void> {
-  try {
-    const input = await readInput<T>();
-    const result = await handler(input);
-    writeResult(result);
-  } catch (err) {
-    writeResult({
-      success: false,
-      message: `Script execution failed: ${err instanceof Error ? err.message : String(err)}`
-    });
-    process.exit(1);
   }
 }

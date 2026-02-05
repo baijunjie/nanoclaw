@@ -4,7 +4,19 @@
  * Usage: echo '{"tweetUrl":"https://x.com/user/status/123","comment":"My thoughts"}' | npx tsx quote.ts
  */
 
-import { getBrowserContext, navigateToTweet, runScript, validateContent, config, ScriptResult } from '../lib/browser.js';
+import { getBrowserContext, navigateToTweet } from '../lib/browser.js';
+import { runScript, ScriptResult } from '../lib/script.js';
+import {
+  validateTweetUrl,
+  validateContent,
+  getFirstTweet,
+  clickTweetButton,
+  fillDialogAndSubmit,
+  truncateForDisplay
+} from '../lib/utils.js';
+import { config } from '../lib/config.js';
+
+const btn = config.selectors.buttons;
 
 interface QuoteInput {
   tweetUrl: string;
@@ -14,9 +26,8 @@ interface QuoteInput {
 async function quoteTweet(input: QuoteInput): Promise<ScriptResult> {
   const { tweetUrl, comment } = input;
 
-  if (!tweetUrl) {
-    return { success: false, message: 'Please provide a tweet URL' };
-  }
+  const urlError = validateTweetUrl(tweetUrl);
+  if (urlError) return urlError;
 
   const validationError = validateContent(comment, 'Comment');
   if (validationError) return validationError;
@@ -30,46 +41,30 @@ async function quoteTweet(input: QuoteInput): Promise<ScriptResult> {
       return { success: false, message: error || 'Navigation failed' };
     }
 
-    // Click retweet button to open menu
-    const tweet = page.locator('article[data-testid="tweet"]').first();
-    const retweetButton = tweet.locator('[data-testid="retweet"]');
-    await retweetButton.waitFor({ timeout: config.timeouts.elementWait });
-    await retweetButton.click();
-    await page.waitForTimeout(config.timeouts.afterClick);
+    // Click retweet button to open menu (could be retweet or unretweet if already retweeted)
+    const tweet = getFirstTweet(page);
+    await clickTweetButton(tweet, `${btn.retweet}, ${btn.unretweet}`, page);
 
     // Click quote option
     const quoteOption = page.getByRole('menuitem').filter({ hasText: /Quote/i });
     await quoteOption.waitFor({ timeout: config.timeouts.elementWait });
     await quoteOption.click();
-    await page.waitForTimeout(config.timeouts.afterClick * 1.5);
+    await page.waitForTimeout(config.timeouts.actionDelay);
 
-    // Find dialog with aria-modal="true"
-    const dialog = page.locator('[role="dialog"][aria-modal="true"]');
-    await dialog.waitFor({ timeout: config.timeouts.elementWait });
+    // Fill dialog and submit
+    const result = await fillDialogAndSubmit({
+      page,
+      content: comment,
+      contentLabel: 'Comment'
+    });
 
-    // Fill comment
-    const quoteInput = dialog.locator('[data-testid="tweetTextarea_0"]');
-    await quoteInput.waitFor({ timeout: config.timeouts.elementWait });
-    await quoteInput.click();
-    await page.waitForTimeout(config.timeouts.afterClick / 2);
-    await quoteInput.fill(comment);
-    await page.waitForTimeout(config.timeouts.afterFill);
-
-    // Click submit button
-    const submitButton = dialog.locator('[data-testid="tweetButton"]');
-    await submitButton.waitFor({ timeout: config.timeouts.elementWait });
-
-    const isDisabled = await submitButton.getAttribute('aria-disabled');
-    if (isDisabled === 'true') {
-      return { success: false, message: 'Submit button disabled. Content may be empty or exceed character limit.' };
+    if (!result.success) {
+      return { success: false, message: result.error || 'Failed to submit quote' };
     }
-
-    await submitButton.click();
-    await page.waitForTimeout(config.timeouts.afterSubmit);
 
     return {
       success: true,
-      message: `Quote tweet posted: ${comment.slice(0, 50)}${comment.length > 50 ? '...' : ''}`
+      message: `Quote tweet posted: ${truncateForDisplay(comment)}`
     };
 
   } finally {
