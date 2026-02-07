@@ -2,7 +2,7 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in Apple Container and handles IPC
  */
-import { spawn } from 'child_process';
+import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -38,12 +38,17 @@ export interface ContainerInput {
   groupFolder: string;
   chatJid: string;
   isMain: boolean;
-  isScheduledTask?: boolean;
+}
+
+export interface AgentResponse {
+  outputType: 'message' | 'log';
+  userMessage?: string;
+  internalLog?: string;
 }
 
 export interface ContainerOutput {
   status: 'success' | 'error';
-  result: string | null;
+  result: AgentResponse | null;
   newSessionId?: string;
   error?: string;
 }
@@ -51,7 +56,7 @@ export interface ContainerOutput {
 interface VolumeMount {
   hostPath: string;
   containerPath: string;
-  readonly?: boolean;
+  readonly: boolean;
 }
 
 function buildVolumeMounts(
@@ -162,8 +167,8 @@ function buildVolumeMounts(
   return mounts;
 }
 
-function buildContainerArgs(mounts: VolumeMount[]): string[] {
-  const args: string[] = ['run', '-i', '--rm'];
+function buildContainerArgs(mounts: VolumeMount[], containerName: string): string[] {
+  const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
   // Apple Container: --mount for readonly, -v for read-write
   for (const mount of mounts) {
@@ -185,6 +190,7 @@ function buildContainerArgs(mounts: VolumeMount[]): string[] {
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
+  onProcess: (proc: ChildProcess, containerName: string) => void,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
 
@@ -192,11 +198,14 @@ export async function runContainerAgent(
   fs.mkdirSync(groupDir, { recursive: true });
 
   const mounts = buildVolumeMounts(group, input.isMain);
-  const containerArgs = buildContainerArgs(mounts);
+  const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
+  const containerName = `nanoclaw-${safeName}-${Date.now()}`;
+  const containerArgs = buildContainerArgs(mounts, containerName);
 
   logger.debug(
     {
       group: group.name,
+      containerName,
       mounts: mounts.map(
         (m) =>
           `${m.hostPath} -> ${m.containerPath}${m.readonly ? ' (ro)' : ''}`,
@@ -209,6 +218,7 @@ export async function runContainerAgent(
   logger.info(
     {
       group: group.name,
+      containerName,
       mountCount: mounts.length,
       isMain: input.isMain,
     },
@@ -222,6 +232,8 @@ export async function runContainerAgent(
     const container = spawn('container', containerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+
+    onProcess(container, containerName);
 
     let stdout = '';
     let stderr = '';
@@ -267,19 +279,48 @@ export async function runContainerAgent(
       }
     });
 
+    let timedOut = false;
+
     const timeout = setTimeout(() => {
-      logger.error({ group: group.name }, 'Container timeout, killing');
-      container.kill('SIGKILL');
-      resolve({
-        status: 'error',
-        result: null,
-        error: `Container timed out after ${CONTAINER_TIMEOUT}ms`,
+      timedOut = true;
+      logger.error({ group: group.name, containerName }, 'Container timeout, stopping gracefully');
+      // Graceful stop: sends SIGTERM, waits, then SIGKILL — lets --rm fire
+      exec(`container stop ${containerName}`, { timeout: 15000 }, (err) => {
+        if (err) {
+          logger.warn({ group: group.name, containerName, err }, 'Graceful stop failed, force killing');
+          container.kill('SIGKILL');
+        }
       });
     }, group.containerConfig?.timeout || CONTAINER_TIMEOUT);
 
     container.on('close', (code) => {
       clearTimeout(timeout);
       const duration = Date.now() - startTime;
+
+      if (timedOut) {
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        const timeoutLog = path.join(logsDir, `container-${ts}.log`);
+        fs.writeFileSync(timeoutLog, [
+          `=== Container Run Log (TIMEOUT) ===`,
+          `Timestamp: ${new Date().toISOString()}`,
+          `Group: ${group.name}`,
+          `Container: ${containerName}`,
+          `Duration: ${duration}ms`,
+          `Exit Code: ${code}`,
+        ].join('\n'));
+
+        logger.error(
+          { group: group.name, containerName, duration, code },
+          'Container timed out',
+        );
+
+        resolve({
+          status: 'error',
+          result: null,
+          error: `Container timed out after ${group.containerConfig?.timeout || CONTAINER_TIMEOUT}ms`,
+        });
+        return;
+      }
 
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const logFile = path.join(logsDir, `container-${timestamp}.log`);
@@ -298,7 +339,9 @@ export async function runContainerAgent(
         ``,
       ];
 
-      if (isVerbose) {
+      const isError = code !== 0;
+
+      if (isVerbose || isError) {
         logLines.push(
           `=== Input ===`,
           JSON.stringify(input, null, 2),
@@ -332,14 +375,6 @@ export async function runContainerAgent(
             .join('\n'),
           ``,
         );
-
-        if (code !== 0) {
-          logLines.push(
-            `=== Stderr (last 500 chars) ===`,
-            stderr.slice(-500),
-            ``,
-          );
-        }
       }
 
       fs.writeFileSync(logFile, logLines.join('\n'));
@@ -351,7 +386,8 @@ export async function runContainerAgent(
             group: group.name,
             code,
             duration,
-            stderr: stderr.slice(-500),
+            stderr,
+            stdout,
             logFile,
           },
           'Container exited with error',
@@ -398,7 +434,8 @@ export async function runContainerAgent(
         logger.error(
           {
             group: group.name,
-            stdout: stdout.slice(-500),
+            stdout,
+            stderr,
             error: err,
           },
           'Failed to parse container output',
@@ -414,7 +451,7 @@ export async function runContainerAgent(
 
     container.on('error', (err) => {
       clearTimeout(timeout);
-      logger.error({ group: group.name, error: err }, 'Container spawn error');
+      logger.error({ group: group.name, containerName, error: err }, 'Container spawn error');
       resolve({
         status: 'error',
         result: null,
