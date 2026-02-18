@@ -10,6 +10,7 @@ import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
+import { createXTools } from './plugins/x-integration/agent.js';
 
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
@@ -273,6 +274,16 @@ Use available_groups.json to find the JID for a group. The folder name should be
     };
   },
 );
+
+// X Integration tools
+const xTools = createXTools({
+  ctx: { chatJid, groupFolder, isMain },
+  dirs: { tasks: TASKS_DIR, ipc: IPC_DIR },
+  writeIpcFile,
+});
+for (const t of xTools) {
+  server.tool(t.name, t.description, t.schema, t.handler);
+}
 
 // Start the stdio transport
 const transport = new StdioServerTransport();
