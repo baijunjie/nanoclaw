@@ -282,7 +282,7 @@ const xTools = createXTools({
   writeIpcFile,
 });
 for (const t of xTools) {
-  server.tool(t.name, t.description, t.schema, t.handler);
+  server.tool(t.name, t.description, t.inputSchema, t.handler);
 }
 
 // Start the stdio transport

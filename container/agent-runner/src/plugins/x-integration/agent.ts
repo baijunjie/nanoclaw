@@ -10,6 +10,7 @@
 
 // @ts-ignore SDK only available in container environment
 import { tool } from '@anthropic-ai/claude-agent-sdk';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
@@ -81,16 +82,11 @@ async function waitForHostResponse(resultsDir: string, requestId: string): Promi
 // MCP Result Helpers
 // ============================================================================
 
-interface McpToolResult {
-  content: Array<{ type: 'text'; text: string }>;
-  isError?: boolean;
-}
-
-function mcpError(message: string): McpToolResult {
+function mcpError(message: string): CallToolResult {
   return { content: [{ type: 'text', text: message }], isError: true };
 }
 
-function toMcpResult(response: HostResponse): McpToolResult {
+function toMcpResult(response: HostResponse): CallToolResult {
   return {
     content: [{ type: 'text', text: response.message }],
     isError: !response.success,
@@ -114,7 +110,7 @@ export function createXTools(deps: XToolsDeps) {
 
   const requireMainGroup = () => (!isMain ? mcpError(NOT_MAIN_GROUP_ERROR) : null);
 
-  const invokeHost = async (action: string, params: Record<string, unknown>): Promise<McpToolResult> => {
+  const invokeHost = async (action: string, params: Record<string, unknown>): Promise<CallToolResult> => {
     const toolName = `${SKILL_NAME}_${action}`;
     const requestId = `${SKILL_NAME}-${action}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
